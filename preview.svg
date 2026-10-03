@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="150" viewBox="0 0 640 150" font-family="Segoe UI, Arial, sans-serif">
+  <rect width="640" height="150" fill="#eef1f6"/>
+  <g transform="translate(60 22)">
+    <rect width="520" height="46" rx="6" fill="#1d1f26"/>
+    <circle cx="26" cy="23" r="7" fill="#ff4d6d"/>
+    <text x="44" y="29" font-size="17" fill="#f2f2f2">2:47</text>
+    <rect x="94" y="19" width="90" height="8" fill="#2b2e38"/>
+    <rect x="94" y="19" width="58" height="8" fill="#4cd38a"/>
+    <text x="200" y="28" font-size="13" fill="#9aa0ad">Ctrl+Пробел — готово   ·   Esc — отмена</text>
+  </g>
+  <g transform="translate(150 86)">
+    <rect width="340" height="46" rx="6" fill="#1d1f26"/>
+    <text x="20" y="30" font-size="18" fill="#4cd38a">✓</text>
+    <text x="44" y="29" font-size="15" fill="#f2f2f2">Вставлено · 412 слов</text>
+    <text x="214" y="28" font-size="12" fill="#9aa0ad">и в буфере — Ctrl+V</text>
+  </g>
+</svg>
