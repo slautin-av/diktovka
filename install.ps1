@@ -1,5 +1,6 @@
-﻿# install.ps1 — установка «Диктовки» одной командой:
-#   iwr -useb https://raw.githubusercontent.com/slautin-av/diktovka/main/install.ps1 | iex
+# install.ps1 — установка «Диктовки» одной командой:
+#   irm https://raw.githubusercontent.com/slautin-av/diktovka/main/install.ps1 | iex
+# Файл без BOM намеренно: запускается через irm | iex, а BOM в начале строки PowerShell принял бы за команду.
 # Ставит Python (если его нет), программу в %LOCALAPPDATA%\diktovka, спрашивает ключ Groq,
 # создаёт ярлыки на рабочем столе и в автозагрузке и запускает. Повторный запуск = обновление.
 

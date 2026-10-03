@@ -27,7 +27,7 @@
 Открыть PowerShell (Пуск → набрать `powershell` → Enter) и вставить:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/slautin-av/diktovka/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/slautin-av/diktovka/main/install.ps1 | iex
 ```
 
 Установщик сам поставит Python, если его нет, спросит ключ и проверит его, создаст ярлык «Диктовка» на рабочем
@@ -94,7 +94,7 @@ Ctrl+Пробел, пока программа работает, принадл�
 ## Удаление
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/slautin-av/diktovka/main/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/slautin-av/diktovka/main/uninstall.ps1 | iex
 ```
 
 Убирает программу, ключ, настройки, ярлыки и автозагрузку. История диктовок переезжает на рабочий стол.

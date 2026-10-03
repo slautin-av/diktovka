@@ -1,5 +1,6 @@
-﻿# uninstall.ps1 — удаление «Диктовки»:
-#   iwr -useb https://raw.githubusercontent.com/slautin-av/diktovka/main/uninstall.ps1 | iex
+# uninstall.ps1 — удаление «Диктовки»:
+#   irm https://raw.githubusercontent.com/slautin-av/diktovka/main/uninstall.ps1 | iex
+# Файл без BOM намеренно: запускается через irm | iex, а BOM в начале строки PowerShell принял бы за команду.
 # История надиктованных текстов (istoriya.md) не удаляется — переезжает на рабочий стол.
 
 $ErrorActionPreference = 'SilentlyContinue'
