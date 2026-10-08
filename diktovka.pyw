@@ -12,6 +12,7 @@
 import ctypes
 import ctypes.wintypes as wt
 import hashlib
+import http.client
 import json
 import os
 import queue
@@ -23,6 +24,7 @@ import time
 import tkinter as tk
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 import winsound
 from datetime import datetime
@@ -41,6 +43,9 @@ MODELS_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "diktovka" / 
 # Модель: GigaAM-v3 e2e rnnt (Сбер, MIT) в полной точности — ONNX-файлы istupakov/gigaam-v3-onnx (MIT).
 # Ревизия закреплена: на ней проверено, что текст символ в символ совпадает с официальным пакетом gigaam.
 # Паузы ищет Silero VAD (MIT). Файл: (репозиторий, ревизия, размер в байтах, sha256).
+# Качаем из выпуска этого репозитория на GitHub (там те же файлы без изменений), запасной источник —
+# Hugging Face на закреплённой ревизии. Каждый файл сверяется по sha256, откуда бы ни пришёл.
+GITHUB_URL = "https://github.com/slautin-av/diktovka/releases/download/model-gigaam-v3-e2e-rnnt-1/{name}"
 HF_URL = "https://huggingface.co/{repo}/resolve/{rev}/{name}"
 GIGAAM_REPO = ("istupakov/gigaam-v3-onnx", "322c3b29492673eb7d0b434bfa9dfb8653e34d02")
 SILERO_REPO = ("istupakov/silero-vad-onnx", "b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6")
@@ -181,11 +186,12 @@ def hotkey_label(text):
 # ---------- модель: скачать один раз ----------
 
 def model_files(model):
-    """[(путь на диске, адрес, размер, sha256)] — все файлы модели и поиска пауз."""
+    """[(путь на диске, [адреса: GitHub, запасной Hugging Face], размер, sha256)] — все файлы модели и поиска пауз."""
     files = [(MODELS_DIR / model / name, repo, rev, size, sha) for name, (repo, rev, size, sha) in MODELS[model].items()]
     folder, name, (repo, rev, size, sha) = VAD_FILE
     files.append((MODELS_DIR / folder / name, repo, rev, size, sha))
-    return [(path, HF_URL.format(repo=repo, rev=rev, name=path.name), size, sha) for path, repo, rev, size, sha in files]
+    return [(path, [GITHUB_URL.format(name=path.name), HF_URL.format(repo=repo, rev=rev, name=path.name)], size, sha)
+            for path, repo, rev, size, sha in files]
 
 
 def missing_files(model):
@@ -196,36 +202,62 @@ def download_size_mb(model):
     return sum(f[2] for f in missing_files(model)) / 2**20
 
 
-def download_models(model, report=None):
-    """Докачивает недостающие файлы с проверкой sha256; оборванная загрузка продолжается с места обрыва.
-    report(скачано_байт, всего_байт) — для полоски прогресса."""
+def download_models(model, report=None, say=None):
+    """Докачивает недостающие файлы с проверкой sha256: сначала с GitHub, не вышло — с Hugging Face.
+    Оборванная загрузка продолжается с места обрыва (файлы в обоих местах одинаковые — докачка тоже).
+    report(скачано_байт, всего_байт) — для полоски прогресса; say(текст) — сообщить о смене источника."""
     todo = missing_files(model)
     total, done = sum(f[2] for f in todo), 0
-    for path, url, size, sha in todo:
+    for path, urls, size, sha in todo:
         path.parent.mkdir(parents=True, exist_ok=True)
         part = path.with_name(path.name + ".part")
-        for attempt in range(4):
-            try:
-                done_before = done
-                done += fetch(url, part, size, report and (lambda got, base=done: report(base + got, total)))
-                break
-            except OSError as error:      # сюда же URLError, обрыв связи, таймаут
-                done = done_before
-                if isinstance(error, urllib.error.HTTPError) and error.code < 500:
-                    raise RuntimeError(f"сервер модели ответил {error.code} на {path.name}") from error
-                if attempt == 3:
-                    if isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError)):
-                        raise RuntimeError("нет связи с huggingface.co — проверь интернет и запусти ещё раз") from error
-                    raise RuntimeError(f"модель не скачалась: {error}") from error
-                time.sleep(3 * (attempt + 1))
-        digest = hashlib.sha256()
-        with part.open("rb") as data:
-            for block in iter(lambda: data.read(1 << 20), b""):
-                digest.update(block)
-        if digest.hexdigest() != sha:
-            part.unlink(missing_ok=True)
-            raise RuntimeError(f"файл модели {path.name} скачался с ошибкой — запусти ещё раз")
+        download_file(urls, part, size, sha, report and (lambda got, base=done: report(base + got, total)), say)
         part.replace(path)
+        done += size
+
+
+def download_file(urls, part, size, sha, report=None, say=None):
+    """Качает файл в part: адреса по очереди, на каждом до трёх попыток. Не вышло ни с одного — RuntimeError."""
+    problems, offline = [], True
+    for number, url in enumerate(urls):
+        host = urllib.parse.urlsplit(url).hostname
+        if number and say:
+            say(f"{problems[-1]} — качаю с {host}")
+        for attempt in range(3):
+            try:
+                fetch(url, part, size, report)
+            except (OSError, http.client.HTTPException) as error:   # сюда же URLError, обрыв связи, таймаут
+                if isinstance(error, urllib.error.HTTPError) and error.code < 500:
+                    problems.append(f"{host} ответил {error.code}")
+                    offline = False
+                    break                                # этот адрес не поможет — к следующему
+                if attempt == 2:
+                    if isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError)):
+                        problems.append(f"нет связи с {host}")
+                    else:
+                        problems.append(f"{host}: {error}")
+                        offline = False
+                    break
+                time.sleep(3 * (attempt + 1))
+                continue
+            if file_sha256(part) == sha:
+                return
+            part.unlink(missing_ok=True)                 # испорчен — следующий адрес качает заново
+            problems.append(f"с {host} файл {part.stem} пришёл с ошибкой")
+            offline = False
+            break
+    hosts = " и ".join(urllib.parse.urlsplit(url).hostname for url in urls)
+    if offline:
+        raise RuntimeError(f"нет связи с {hosts} — проверь интернет и запусти ещё раз")
+    raise RuntimeError("модель не скачалась: " + "; ".join(problems))
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as data:
+        for block in iter(lambda: data.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def fetch(url, part, size, report):
@@ -259,7 +291,7 @@ def console_download(model):
     if not missing_files(model):
         print("Модель распознавания уже на месте:", MODELS_DIR, flush=True)
         return
-    print(f"Скачиваю модель распознавания GigaAM-v3 ({download_size_mb(model):.0f} МБ, один раз)...", flush=True)
+    print(f"Скачиваю модель распознавания GigaAM-v3 с GitHub ({download_size_mb(model):.0f} МБ, один раз)...", flush=True)
     shown = [-1]
 
     def report(done, total):
@@ -267,7 +299,7 @@ def console_download(model):
         if percent != shown[0]:
             shown[0] = percent
             print(f"\r  {percent}%  ({done / 2**20:.0f} из {total / 2**20:.0f} МБ)", end="", flush=True)
-    download_models(model, report)
+    download_models(model, report, lambda text: print("\n  " + text, flush=True))
     print("\nМодель скачана:", MODELS_DIR, flush=True)
 
 

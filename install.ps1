@@ -1,16 +1,31 @@
 # install.ps1 — установка «Диктовки» одной командой:
 #   irm https://raw.githubusercontent.com/slautin-av/diktovka/main/install.ps1 | iex
 # Файл без BOM намеренно: запускается через irm | iex, а BOM в начале строки PowerShell принял бы за команду.
-# Ставит Python (если подходящего нет), программу в %LOCALAPPDATA%\diktovka, скачивает модель распознавания
-# GigaAM-v3 (~0,9 ГБ, один раз), создаёт ярлыки на рабочем столе и в автозагрузке и запускает.
+# Ставит Python (если подходящего нет — официальный с python.org, только для текущего пользователя, права
+# администратора не нужны), программу в %LOCALAPPDATA%\diktovka, скачивает модель распознавания GigaAM-v3
+# (~0,9 ГБ, один раз, из выпуска этого репозитория на GitHub; запасной источник — Hugging Face),
+# создаёт ярлыки на рабочем столе и в автозагрузке и запускает.
 # Повторный запуск = обновление (настройки и модель сохраняются).
+#
+# Необязательные переменные окружения — для проверок и своих сборок, обычной установке не нужны:
+#   DIKTOVKA_DIR=<папка>     поставить программу в другую папку (модель — всё равно в %LOCALAPPDATA%\diktovka\models)
+#   DIKTOVKA_SOURCE=<папка>  взять diktovka.pyw и README.md из своей папки, а не с GitHub
+#   DIKTOVKA_NO_SHORTCUTS=1  не создавать ярлыки на рабочем столе и в автозагрузке
+#   DIKTOVKA_NO_LAUNCH=1     не запускать программу в конце
+# Пробная установка, которая не задевает основную: в отдельном окне PowerShell задать
+# $env:LOCALAPPDATA = '<пустая папка>' и $env:DIKTOVKA_NO_SHORTCUTS = '1' — туда лягут программа, модель
+# и Python (если его нет). Установщик останавливает только копию, запущенную из своей папки.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $raw = 'https://raw.githubusercontent.com/slautin-av/diktovka/main'
 $dir = if ($env:DIKTOVKA_DIR) { $env:DIKTOVKA_DIR } else { Join-Path $env:LOCALAPPDATA 'diktovka' }
+$script = Join-Path $dir 'diktovka.pyw'
 # Python 3.10–3.13: под них есть готовая сборка onnxruntime той версии, на которой проверялась модель
 $pyCheck = 'import sys; print((3, 10) <= sys.version_info[:2] <= (3, 13), sys.executable)'
+# Если Python нет — этот, официальный, с python.org; sha256 — опубликованный на python.org
+$pyVersion = '3.13.16'
+$pySetupSha256 = 'fb4f9f5d438b2396da0086dc70b935c530cb578e37adc6d354f7ad2037fee83b'
 
 Write-Host ''
 Write-Host '=== Диктовка — установка ===' -ForegroundColor Cyan
@@ -31,21 +46,40 @@ function Find-Python {
     return $null
 }
 
+# Официальный установщик с python.org: только для текущего пользователя (права администратора не нужны),
+# в %LOCALAPPDATA%\Programs\Python\Python313 — там его найдёт Find-Python; PATH и ассоциации файлов не трогает.
+function Install-PythonOrg {
+    $setup = Join-Path $env:TEMP "python-$pyVersion-amd64.exe"
+    Invoke-WebRequest -UseBasicParsing -Uri "https://www.python.org/ftp/python/$pyVersion/python-$pyVersion-amd64.exe" -OutFile $setup
+    try {
+        if ((Get-FileHash $setup -Algorithm SHA256).Hash -ne $pySetupSha256) { throw 'установщик Python скачался с ошибкой' }
+        $target = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313'
+        $setupArgs = '/quiet', 'InstallAllUsers=0', "TargetDir=`"$target`"", 'PrependPath=0', 'Include_launcher=0',
+                     'InstallLauncherAllUsers=0', 'Include_test=0', 'Include_doc=0', 'Shortcuts=0', 'AssociateFiles=0'
+        $run = Start-Process -FilePath $setup -ArgumentList $setupArgs -Wait -PassThru
+        if ($run.ExitCode -ne 0) { throw "установщик Python завершился с кодом $($run.ExitCode)" }
+    } finally { Remove-Item $setup -Force -ErrorAction SilentlyContinue }
+}
+
 $python = Find-Python
 if (-not $python) {
-    Write-Host 'Подходящего Python нет — ставлю Python 3.12 (официальный, через winget)...' -ForegroundColor Yellow
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw 'Нет winget. Поставь Python 3.12 с python.org (галочка «Add to PATH») и запусти установку ещё раз.'
+    Write-Host "Подходящего Python нет — ставлю Python $pyVersion (официальный, с python.org, минута-две)..." -ForegroundColor Yellow
+    if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') {
+        try { Install-PythonOrg } catch { Write-Host "С python.org не поставился: $($_.Exception.Message)" -ForegroundColor Yellow }
+        $python = Find-Python
     }
-    winget install -e --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements | Out-Host
-    $python = Find-Python
-    if (-not $python) { throw 'Python поставился, но не находится. Закрой PowerShell, открой заново и повтори команду.' }
+    if (-not $python -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Host 'Пробую через winget...' -ForegroundColor Yellow
+        winget install -e --id Python.Python.3.13 --scope user --source winget --silent --accept-package-agreements --accept-source-agreements | Out-Host
+        $python = Find-Python
+    }
+    if (-not $python) { throw 'Python не поставился. Поставь Python 3.13 с python.org (галочка «Add to PATH») и запусти установку ещё раз.' }
 }
 Write-Host "Python: $python"
 
-# --- 2. Остановить работающую копию (если это обновление) ---
+# --- 2. Остановить работающую копию из этой папки (если это обновление) ---
 Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*diktovka.pyw*' } |
+    Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($script, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
     ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }
 
 # --- 3. Файлы программы ---
@@ -73,8 +107,7 @@ Write-Host 'Ставлю библиотеки (минута-две)...'
 & $venvPy -m pip install -q --disable-pip-version-check --upgrade sounddevice soundfile numpy 'onnxruntime==1.23.2' 'onnx-asr==0.12.0'
 if ($LASTEXITCODE -ne 0) { throw 'Библиотеки не поставились — проверь интернет и запусти команду ещё раз.' }
 
-# --- 5. Модель распознавания: один раз, ~0,9 ГБ; дальше интернет не нужен ---
-$script = Join-Path $dir 'diktovka.pyw'
+# --- 5. Модель распознавания: один раз, ~0,9 ГБ с GitHub (не вышло — с Hugging Face); дальше интернет не нужен ---
 & $venvPy $script --download
 if ($LASTEXITCODE -ne 0) {
     Write-Host 'Модель сейчас не скачалась. Диктовка докачает её сама при первом запуске — нужен интернет.' -ForegroundColor Yellow
