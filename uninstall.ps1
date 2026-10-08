@@ -5,6 +5,7 @@
 
 $ErrorActionPreference = 'SilentlyContinue'
 $dir = Join-Path $env:LOCALAPPDATA 'diktovka'
+$models = Join-Path $env:LOCALAPPDATA 'diktovka\models'   # модель распознавания (~0,9 ГБ)
 
 Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
     Where-Object { $_.CommandLine -like '*diktovka.pyw*' } |
@@ -21,6 +22,7 @@ if (Test-Path $history) {
     Move-Item $history $saved -Force
     Write-Host "История диктовок сохранена: $saved"
 }
+Remove-Item $models -Recurse -Force
 Remove-Item $dir -Recurse -Force
 
-Write-Host 'Диктовка удалена: программа, ключ, настройки, ярлыки и автозагрузка.' -ForegroundColor Green
+Write-Host 'Диктовка удалена: программа, модель распознавания, настройки, ярлыки и автозагрузка.' -ForegroundColor Green
