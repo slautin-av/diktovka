@@ -5,4 +5,5 @@ istoriya.md
 oshibki.log
 open/
 config.json
+config-whisper.json
 groq.env
