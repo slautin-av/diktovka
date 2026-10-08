@@ -134,10 +134,15 @@ if (-not $env:DIKTOVKA_NO_SHORTCUTS) {
 }
 
 # --- 7. Запуск ---
-if (-not $env:DIKTOVKA_NO_LAUNCH) { Start-Process -FilePath $pythonw -ArgumentList "`"$script`"" -WorkingDirectory $dir }
-
-Write-Host ''
-Write-Host 'Готово! Диктовка работает в фоне и будет запускаться сама при входе в Windows.' -ForegroundColor Green
-Write-Host 'Поставь курсор в любое поле -> Ctrl+Пробел -> говори -> Ctrl+Пробел. Esc — отмена.'
-Write-Host 'Распознаёт прямо на компьютере: интернет, ключ и VPN больше не нужны.'
-Write-Host 'Если антивирус спросит про микрофон — «Разрешить». Настройки и свой словарь — README.md в папке программы.'
+# Без return/exit: установщик запускают через iex, и они оборвали бы вызвавший его сценарий
+if ($env:DIKTOVKA_NO_LAUNCH) {
+    Write-Host ''
+    Write-Host 'Программа установлена (запуск — отдельно).'
+} else {
+    Start-Process -FilePath $pythonw -ArgumentList "`"$script`"" -WorkingDirectory $dir
+    Write-Host ''
+    Write-Host 'Готово! Диктовка работает в фоне и будет запускаться сама при входе в Windows.' -ForegroundColor Green
+    Write-Host 'Поставь курсор в любое поле -> Ctrl+Пробел -> говори -> Ctrl+Пробел. Esc — отмена.'
+    Write-Host 'Распознаёт прямо на компьютере: интернет, ключ и VPN больше не нужны.'
+    Write-Host 'Если антивирус спросит про микрофон — «Разрешить». Настройки и свой словарь — README.md в папке программы.'
+}
