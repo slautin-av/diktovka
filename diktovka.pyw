@@ -3,6 +3,7 @@
 Распознавание — GigaAM-v3 (открытая модель Сбера для русской речи) в полной точности, прямо на компьютере:
 без интернета, ключей и VPN. Модель (~0,9 ГБ) скачивается один раз — при установке или при первом запуске.
 Ограничения по длине нет: длинная запись режется на паузах и распознаётся по частям.
+Последние диктовки — окно по Ctrl+Alt+Пробел: найти нужную и скопировать, если буфер уже перезаписан.
 Только Windows. Лицензия MIT.
 
 Запуск без консоли:  pythonw diktovka.pyw
@@ -37,7 +38,7 @@ import soundfile as sf
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
 RECORDS_DIR = HERE / "zapisi"          # аудио последних диктовок — страховка, если распознавание подвело
-HISTORY_PATH = HERE / "istoriya.md"    # все распознанные тексты — ничего не теряется
+HISTORY_PATH = HERE / "istoriya.md"    # тексты последних диктовок — окно по Ctrl+Alt+Пробел
 MODELS_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "diktovka" / "models"
 
 # Модель: GigaAM-v3 e2e rnnt (Сбер, MIT) в полной точности — ONNX-файлы istupakov/gigaam-v3-onnx (MIT).
@@ -67,8 +68,9 @@ VAD_FILE = ("silero-vad", "silero_vad.onnx",
 
 DEFAULT_CONFIG = {
     "hotkey": "ctrl+space",
+    "history_hotkey": "ctrl+alt+space",   # окно последних диктовок: найти нужную и скопировать
     "paste": True,            # True — вставить в поле с курсором; False — только положить в буфер обмена
-    "keep_records": 20,       # сколько последних аудиозаписей хранить в zapisi/
+    "keep_records": 20,       # сколько последних диктовок помнить (тексты в istoriya.md, аудио в zapisi/)
     "model": "gigaam-v3-e2e-rnnt",   # полная GigaAM-v3 (не сжатая) — другой нет
     "threads": 0,             # сколько ядер процессора отдавать распознаванию; 0 — подобрать самой
     # Свой словарь: «как модель пишет на слух» → «как надо». Слева — слово или регулярное выражение,
@@ -106,6 +108,9 @@ user32.SetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
 user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
 user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.UINT]
 user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
+user32.GetForegroundWindow.restype = wt.HWND
+user32.SetForegroundWindow.argtypes = [wt.HWND]
+user32.IsWindow.argtypes = [wt.HWND]
 kernel32.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
 kernel32.GlobalAlloc.restype = ctypes.c_void_p
 kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
@@ -122,7 +127,7 @@ WM_APP_ESC_ON = 0x8001
 WM_APP_ESC_OFF = 0x8002
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4000
 VK_ESCAPE, VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN, VK_V = 0x1B, 0x11, 0x12, 0x10, 0x5B, 0x5C, 0x56
-HOTKEY_MAIN, HOTKEY_ESC = 1, 2
+HOTKEY_ESC = 1                         # остальные клавиши — с номера 2
 
 SPECIAL_KEYS = {
     "space": 0x20, "pause": 0x13, "insert": 0x2D, "home": 0x24, "end": 0x23,
@@ -603,22 +608,26 @@ def paste_at_cursor():
 class HotkeyThread(threading.Thread):
     """Глобальные клавиши через RegisterHotKey: работают в любом окне, нажатие не уходит в программу."""
 
-    def __init__(self, mods, vk, events):
+    def __init__(self, keys, events):
+        """keys — {имя события: (модификаторы, код клавиши)}; нажатие кладёт имя в events."""
         super().__init__(daemon=True)
-        self.mods, self.vk, self.events = mods, vk, events
+        self.keys, self.events = keys, events
         self.ready = threading.Event()
-        self.registered = False
+        self.registered = {}
         self.thread_id = None
 
     def run(self):
         self.thread_id = kernel32.GetCurrentThreadId()
-        self.registered = bool(user32.RegisterHotKey(None, HOTKEY_MAIN, self.mods | MOD_NOREPEAT, self.vk))
+        names = {HOTKEY_ESC: "esc"}
+        for number, (name, (mods, vk)) in enumerate(self.keys.items(), start=HOTKEY_ESC + 1):
+            self.registered[name] = bool(user32.RegisterHotKey(None, number, mods | MOD_NOREPEAT, vk))
+            names[number] = name
         msg = wt.MSG()
         user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)   # создать очередь сообщений потока
         self.ready.set()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == WM_HOTKEY:
-                self.events.put("main" if msg.wParam == HOTKEY_MAIN else "esc")
+                self.events.put(names.get(msg.wParam, "esc"))
             elif msg.message == WM_APP_ESC_ON:
                 user32.RegisterHotKey(None, HOTKEY_ESC, MOD_NOREPEAT, VK_ESCAPE)
             elif msg.message == WM_APP_ESC_OFF:
@@ -636,8 +645,9 @@ def beep(frequency, duration=70):
 # ---------- приложение ----------
 
 class Dictation:
-    BG, FG, DIM = "#1d1f26", "#f2f2f2", "#9aa0ad"
+    BG, FG, DIM, CARD = "#1d1f26", "#f2f2f2", "#9aa0ad", "#2b2e38"
     RED, GREEN, AMBER, BLUE = "#ff4d6d", "#4cd38a", "#ffb84d", "#6aa8ff"
+    HISTORY_WIDTH = 680
 
     def __init__(self, config):
         self.config = config
@@ -651,6 +661,8 @@ class Dictation:
         self.audio_label = ""
         self.downloaded, self.download_percent = False, None
         self.key_label = hotkey_label(config["hotkey"])
+        self.history_label = hotkey_label(config["history_hotkey"])
+        self.history_window, self.previous_window = None, None
 
         self.root = tk.Tk()
         self.root.title("Диктовка")
@@ -682,15 +694,18 @@ class Dictation:
         user32.ShowWindow(self.hwnd, 0)
         self.root.attributes("-alpha", 0.94)
 
-        mods, vk = parse_hotkey(config["hotkey"])
-        self.hotkeys = HotkeyThread(mods, vk, self.events)
+        keys = {"main": parse_hotkey(config["hotkey"]), "history": parse_hotkey(config["history_hotkey"])}
+        self.hotkeys = HotkeyThread(keys, self.events)
         self.hotkeys.start()
         self.hotkeys.ready.wait(3)
         if replacement_errors:
             print("Ошибки в replacements (config.json):", *replacement_errors, sep="\n  ", file=sys.stderr)
-        if not self.hotkeys.registered:
+        if not self.hotkeys.registered.get("main"):
             self.show("✗", self.AMBER, f"{self.key_label} занята другой программой",
                       "поменяй «hotkey» в config.json", hide_after=15000)
+        elif not self.hotkeys.registered.get("history"):
+            self.show("✗", self.AMBER, f"{self.history_label} занята другой программой",
+                      "поменяй «history_hotkey» в config.json", hide_after=15000)
         elif replacement_errors:
             self.show("✗", self.AMBER, "В replacements (config.json) ошибка — правило пропущено",
                       replacement_errors[0][:80], hide_after=12000)
@@ -756,6 +771,8 @@ class Dictation:
                         self.on_result(kind, payload)
                 elif event == "main":
                     self.toggle()
+                elif event == "history":
+                    self.toggle_history()
                 elif event == "esc" and self.state in ("starting", "recording"):
                     self.cancel()
         except queue.Empty:
@@ -887,7 +904,10 @@ class Dictation:
                                          progress=lambda done, total: self.events.put(("progress", (done, total))))
             text = apply_replacements(text, self.replacements)
             if text:
-                save_history(stamp, seconds, text)
+                try:
+                    save_history(stamp, seconds, text, self.config["keep_records"])
+                except Exception:          # журнал не записался — текст всё равно вставляем
+                    traceback.print_exc()
                 set_clipboard(text)
                 if self.config["paste"]:
                     paste_at_cursor()
@@ -908,7 +928,96 @@ class Dictation:
             words = len(payload.split())
             action = "Вставлено" if self.config["paste"] else "В буфере обмена"
             self.show("✓", self.GREEN, f"{action} · {words} {plural(words, 'слово', 'слова', 'слов')}",
-                      "текст остался и в буфере — Ctrl+V", hide_after=2200)
+                      f"текст и в буфере — Ctrl+V   ·   все последние — {self.history_label}", hide_after=2500)
+
+    # --- окно последних диктовок ---
+    def toggle_history(self):
+        if self.history_window is not None:
+            self.close_history()
+        else:
+            self.open_history()
+
+    def open_history(self):
+        """Последние диктовки, свежая сверху. «Копировать» кладёт текст в буфер и возвращает в окно,
+        где работал, — остаётся Ctrl+V. Выручает, когда буфер уже перезаписан чем-то другим."""
+        self.previous_window = user32.GetForegroundWindow()
+        entries = list(reversed(read_history()))
+        win = self.history_window = tk.Toplevel(self.root, bg=self.BG)
+        win.title("Диктовка — последние диктовки")
+        win.attributes("-topmost", True)
+        width = self.HISTORY_WIDTH
+        height = min(660, win.winfo_screenheight() - 160)
+        x, y = (win.winfo_screenwidth() - width) // 2, (win.winfo_screenheight() - height) // 2 - 30
+        win.geometry(f"{width}x{height}+{x}+{y}")
+        win.resizable(False, True)
+        win.protocol("WM_DELETE_WINDOW", self.close_history)
+        win.bind("<Escape>", lambda e: self.close_history())
+        if entries:
+            win.bind("<Return>", lambda e: self.copy_from_history(entries[0][2]))
+
+        head = tk.Frame(win, bg=self.BG, padx=16, pady=12)
+        head.pack(fill="x")
+        tk.Label(head, text="Последние диктовки", font=("Segoe UI", 13, "bold"),
+                 bg=self.BG, fg=self.FG).pack(side="left")
+        tk.Label(head, text=f"помню {self.config['keep_records']} последних  ·  Enter — скопировать верхнюю  ·  Esc — закрыть",
+                 font=("Segoe UI", 9), bg=self.BG, fg=self.DIM).pack(side="right")
+
+        body = tk.Frame(win, bg=self.BG)
+        body.pack(fill="both", expand=True)
+        canvas = tk.Canvas(body, bg=self.BG, highlightthickness=0, yscrollincrement=40)
+        bar = tk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=self.BG)
+        item = canvas.create_window(0, 0, window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(item, width=e.width))
+        win.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+
+        if not entries:
+            tk.Label(inner, text=f"Пока пусто — продиктуй что-нибудь: {self.key_label}",
+                     font=("Segoe UI", 11), bg=self.BG, fg=self.DIM).pack(pady=40)
+        for when, length, text in entries:
+            card = tk.Frame(inner, bg=self.CARD, padx=14, pady=10)
+            card.pack(fill="x", padx=(16, 8), pady=(0, 10))
+            top = tk.Frame(card, bg=self.CARD)
+            top.pack(fill="x")
+            words = len(text.split())
+            tk.Label(top, text=f"{friendly_when(when)}   ·   {length}   ·   {words} {plural(words, 'слово', 'слова', 'слов')}",
+                     font=("Segoe UI", 9), bg=self.CARD, fg=self.DIM).pack(side="left")
+            tk.Button(top, text="Копировать", font=("Segoe UI", 10), bg=self.BLUE, fg="#0d1220",
+                      activebackground=self.GREEN, activeforeground="#0d1220", relief="flat", bd=0,
+                      padx=14, pady=3, cursor="hand2",
+                      command=lambda t=text: self.copy_from_history(t)).pack(side="right")
+            tk.Label(card, text=preview(text), font=("Segoe UI", 10), bg=self.CARD, fg=self.FG,
+                     wraplength=width - 100, justify="left", anchor="w").pack(fill="x", pady=(6, 0))
+
+        win.update_idletasks()
+        win.lift()
+        win.focus_force()
+        user32.SetForegroundWindow(user32.GetParent(win.winfo_id()))
+
+    def close_history(self):
+        if self.history_window is None:
+            return
+        self.history_window.destroy()
+        self.history_window = None
+        previous, self.previous_window = self.previous_window, None
+        if previous and user32.IsWindow(previous):
+            user32.SetForegroundWindow(previous)     # обратно туда, где работал
+
+    def copy_from_history(self, text):
+        try:
+            set_clipboard(text)
+        except Exception as error:
+            self.show("✗", self.AMBER, "Не скопировал: " + str(error)[:70], hide_after=6000)
+            return
+        self.close_history()
+        if self.state == "idle":
+            words = len(text.split())
+            self.show("✓", self.GREEN, f"Скопировано · {words} {plural(words, 'слово', 'слова', 'слов')}",
+                      "вставь — Ctrl+V", hide_after=2500)
 
     def quit(self):
         if self.stream:
@@ -927,12 +1036,52 @@ def plural(n, one, few, many):
     return many
 
 
-def save_history(stamp, seconds, text):
-    new = not HISTORY_PATH.exists()
-    with HISTORY_PATH.open("a", encoding="utf-8") as history:
-        if new:
-            history.write("# История диктовок\n\n")
-        history.write(f"## {stamp:%Y-%m-%d %H:%M} · {int(seconds) // 60}:{int(seconds) % 60:02d}\n\n{text}\n\n")
+HISTORY_HEADING = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) · (\d+:\d{2})\s*$")
+
+
+def read_history():
+    """istoriya.md → [(когда, длина, текст)], от старых к новым."""
+    if not HISTORY_PATH.exists():
+        return []
+    entries = []
+    for line in HISTORY_PATH.read_text(encoding="utf-8").splitlines():
+        heading = HISTORY_HEADING.match(line)
+        if heading:
+            entries.append((heading[1], heading[2], []))
+        elif entries:
+            entries[-1][2].append(line)
+    return [(when, length, "\n".join(lines).strip()) for when, length, lines in entries]
+
+
+def save_history(stamp, seconds, text, keep):
+    """Дописывает диктовку в istoriya.md и оставляет keep последних: новая вытесняет самую старую."""
+    entries = read_history() + [(f"{stamp:%Y-%m-%d %H:%M}", f"{int(seconds) // 60}:{int(seconds) % 60:02d}", text)]
+    entries = entries[-keep:] if keep > 0 else []
+    body = "".join(f"## {when} · {length}\n\n{text}\n\n" for when, length, text in entries)
+    temp = HISTORY_PATH.with_name(HISTORY_PATH.name + ".tmp")
+    temp.write_text("# История диктовок\n\n" + body, encoding="utf-8")
+    for attempt in range(20):             # файл на миг может держать окно истории или редактор
+        try:
+            temp.replace(HISTORY_PATH)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
+
+
+def friendly_when(when):
+    """'2026-10-15 15:41' → 'сегодня 15:41', 'вчера 15:41' или '13.10 15:41'."""
+    moment = datetime.strptime(when, "%Y-%m-%d %H:%M")
+    days = (datetime.now().date() - moment.date()).days
+    day = {0: "сегодня", 1: "вчера"}.get(days) or f"{moment:%d.%m}"
+    return f"{day} {moment:%H:%M}"
+
+
+def preview(text, limit=320):
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + " …"
 
 
 def prune_records(keep):
